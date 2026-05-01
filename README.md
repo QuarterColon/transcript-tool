@@ -1,12 +1,12 @@
 # Local Transcript Tool
 
-A simple local Python browser app for transcribing audio/video files and capturing video screenshots at a chosen interval.
+A simple local Python browser app for transcribing audio/video files and creating PDF reports with transcript-based video screenshots.
 
 The app uses:
 
 - Streamlit for the local browser UI
 - faster-whisper for local transcription
-- ffmpeg for audio extraction and screenshots
+- ffmpeg for audio extraction and transcript-based screenshots
 
 No cloud transcription or remote LLM service is used by the app. For fully offline operation, install dependencies and cache the selected Whisper model before disconnecting from the internet.
 
@@ -75,8 +75,7 @@ The folder contains:
 - `audio.wav` for video inputs
 - `transcript.txt`
 - `segments.json`
-- `screenshots/` for video inputs
-- `screenshots.zip` when screenshots are captured
+- `transcript_report.pdf` with transcript-based screenshots for video inputs
 
 ## Supported Files
 

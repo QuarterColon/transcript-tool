@@ -5,12 +5,18 @@ import shutil
 import subprocess
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import timedelta
+from datetime import datetime
+from html import escape
 from pathlib import Path
 from typing import Iterable
 
 import streamlit as st
 from faster_whisper import WhisperModel
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import Image as PdfImage
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 
 APP_TITLE = "Local Transcript Tool"
@@ -32,7 +38,7 @@ class TranscriptSegment:
 def page_setup() -> None:
     st.set_page_config(page_title=APP_TITLE, page_icon=":material/graphic_eq:", layout="wide")
     st.title(APP_TITLE)
-    st.caption("Transcribe audio/video locally and capture video screenshots at a chosen interval.")
+    st.caption("Transcribe audio/video locally and create PDF reports with transcript-based screenshots.")
 
 
 def ensure_output_dir() -> None:
@@ -83,22 +89,45 @@ def extract_audio(video_path: Path, audio_path: Path) -> None:
     )
 
 
-def capture_screenshots(video_path: Path, screenshot_dir: Path, interval_seconds: int) -> list[Path]:
+def select_screenshot_timestamps(
+    segments: list[TranscriptSegment],
+    minimum_gap_seconds: float = 15.0,
+) -> list[float]:
+    timestamps: list[float] = []
+    last_timestamp: float | None = None
+    for segment in segments:
+        midpoint = max((segment.start + segment.end) / 2, 0)
+        if last_timestamp is None or midpoint - last_timestamp >= minimum_gap_seconds:
+            timestamps.append(midpoint)
+            last_timestamp = midpoint
+    return timestamps
+
+
+def capture_screenshots_at_timestamps(
+    video_path: Path,
+    screenshot_dir: Path,
+    timestamps: list[float],
+) -> list[tuple[float, Path]]:
     screenshot_dir.mkdir(parents=True, exist_ok=True)
-    pattern = screenshot_dir / "screenshot_%04d.jpg"
-    run_ffmpeg(
-        [
-            "-i",
-            str(video_path),
-            "-vf",
-            f"fps=1/{interval_seconds}",
-            "-q:v",
-            "2",
-            str(pattern),
-        ],
-        "Screenshot capture",
-    )
-    return sorted(screenshot_dir.glob("*.jpg"))
+    captures: list[tuple[float, Path]] = []
+    for index, timestamp in enumerate(timestamps, start=1):
+        screenshot_path = screenshot_dir / f"screenshot_{index:04d}.jpg"
+        run_ffmpeg(
+            [
+                "-ss",
+                f"{timestamp:.3f}",
+                "-i",
+                str(video_path),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(screenshot_path),
+            ],
+            "Screenshot capture",
+        )
+        captures.append((timestamp, screenshot_path))
+    return captures
 
 
 @st.cache_resource(show_spinner=False)
@@ -166,12 +195,74 @@ def write_outputs(job_dir: Path, transcript_text: str, segments: list[Transcript
     return transcript_path, segments_path
 
 
-def zip_screenshots(job_dir: Path, screenshot_paths: list[Path]) -> Path | None:
-    if not screenshot_paths:
-        return None
-    archive_base = job_dir / "screenshots"
-    archive_path = shutil.make_archive(str(archive_base), "zip", screenshot_paths[0].parent)
-    return Path(archive_path)
+def add_screenshot_to_pdf(story: list, screenshot_path: Path, timestamp: float, styles) -> None:
+    story.append(Spacer(1, 0.12 * inch))
+    story.append(Paragraph(f"Screenshot at {format_timestamp(timestamp)}", styles["Heading3"]))
+
+    image = PdfImage(str(screenshot_path))
+    max_width = 6.8 * inch
+    max_height = 3.8 * inch
+    scale = min(max_width / image.imageWidth, max_height / image.imageHeight, 1)
+    image.drawWidth = image.imageWidth * scale
+    image.drawHeight = image.imageHeight * scale
+    story.append(image)
+    story.append(Spacer(1, 0.16 * inch))
+
+
+def write_pdf_report(
+    job_dir: Path,
+    source_name: str,
+    transcript_text: str,
+    segments: list[TranscriptSegment],
+    screenshot_items: list[tuple[float, Path]],
+    model_name: str,
+    compute_type: str,
+) -> Path:
+    pdf_path = job_dir / "transcript_report.pdf"
+    doc = SimpleDocTemplate(
+        str(pdf_path),
+        pagesize=A4,
+        rightMargin=0.45 * inch,
+        leftMargin=0.45 * inch,
+        topMargin=0.45 * inch,
+        bottomMargin=0.45 * inch,
+    )
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph("Transcript Report", styles["Title"]),
+        Spacer(1, 0.12 * inch),
+        Paragraph(f"<b>Source:</b> {escape(source_name)}", styles["BodyText"]),
+        Paragraph(f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles["BodyText"]),
+        Paragraph(f"<b>Model:</b> {escape(model_name)} / {escape(compute_type)}", styles["BodyText"]),
+        Spacer(1, 0.2 * inch),
+    ]
+
+    screenshot_items = sorted(screenshot_items, key=lambda item: item[0])
+    next_screenshot = 0
+
+    def add_due_screenshots(up_to_seconds: float) -> None:
+        nonlocal next_screenshot
+        while next_screenshot < len(screenshot_items) and screenshot_items[next_screenshot][0] <= up_to_seconds:
+            timestamp, screenshot_path = screenshot_items[next_screenshot]
+            add_screenshot_to_pdf(story, screenshot_path, timestamp, styles)
+            next_screenshot += 1
+
+    if segments:
+        story.append(Paragraph("Transcript", styles["Heading2"]))
+        for segment in segments:
+            add_due_screenshots(segment.start)
+            timestamp = f"{format_timestamp(segment.start)} - {format_timestamp(segment.end)}"
+            text = escape(segment.text.strip())
+            story.append(Paragraph(f"<b>{timestamp}</b><br/>{text}", styles["BodyText"]))
+            story.append(Spacer(1, 0.08 * inch))
+            add_due_screenshots(segment.end)
+        add_due_screenshots(float("inf"))
+    else:
+        story.append(Paragraph("Transcript", styles["Heading2"]))
+        story.append(Paragraph(escape(transcript_text or "No transcript text was generated."), styles["BodyText"]))
+
+    doc.build(story)
+    return pdf_path
 
 
 def render_settings() -> tuple[str, str, bool, str | None]:
@@ -198,7 +289,6 @@ def render_download(label: str, path: Path, mime: str) -> None:
 
 def process_upload(
     uploaded_file,
-    screenshot_interval: int,
     model_name: str,
     compute_type: str,
     local_files_only: bool,
@@ -217,7 +307,7 @@ def process_upload(
         return
 
     audio_path = source_path
-    screenshot_paths: list[Path] = []
+    screenshot_items: list[tuple[float, Path]] = []
 
     progress = st.progress(0, text="Preparing media")
     try:
@@ -225,9 +315,6 @@ def process_upload(
             audio_path = job_dir / "audio.wav"
             progress.progress(10, text="Extracting audio from video")
             extract_audio(source_path, audio_path)
-
-            progress.progress(25, text="Capturing screenshots")
-            screenshot_paths = capture_screenshots(source_path, job_dir / "screenshots", screenshot_interval)
 
         progress.progress(45, text="Loading local transcription model")
         progress.progress(60, text="Transcribing media")
@@ -239,9 +326,27 @@ def process_upload(
             language=language,
         )
 
+        if kind == "video" and segments:
+            progress.progress(80, text="Capturing transcript-based screenshots")
+            screenshot_timestamps = select_screenshot_timestamps(segments)
+            screenshot_items = capture_screenshots_at_timestamps(
+                source_path,
+                job_dir / "pdf_screenshots",
+                screenshot_timestamps,
+            )
+
         progress.progress(90, text="Saving outputs")
         transcript_path, segments_path = write_outputs(job_dir, transcript_text, segments)
-        screenshots_zip = zip_screenshots(job_dir, screenshot_paths)
+        pdf_path = write_pdf_report(
+            job_dir=job_dir,
+            source_name=source_path.name,
+            transcript_text=transcript_text,
+            segments=segments,
+            screenshot_items=screenshot_items,
+            model_name=model_name,
+            compute_type=compute_type,
+        )
+        shutil.rmtree(job_dir / "pdf_screenshots", ignore_errors=True)
         progress.progress(100, text="Done")
     except Exception as exc:
         progress.empty()
@@ -263,16 +368,7 @@ def process_upload(
     with col2:
         render_download("Download segments JSON", segments_path, "application/json")
     with col3:
-        if screenshots_zip:
-            render_download("Download screenshots ZIP", screenshots_zip, "application/zip")
-
-    if screenshot_paths:
-        st.subheader("Screenshots")
-        st.caption(f"{len(screenshot_paths)} screenshots captured every {timedelta(seconds=screenshot_interval)}.")
-        preview_columns = st.columns(4)
-        for index, screenshot_path in enumerate(screenshot_paths[:12]):
-            with preview_columns[index % 4]:
-                st.image(str(screenshot_path), caption=screenshot_path.name, use_container_width=True)
+        render_download("Download PDF report", pdf_path, "application/pdf")
 
 
 def main() -> None:
@@ -290,16 +386,6 @@ def main() -> None:
         type=sorted(extension.lstrip(".") for extension in SUPPORTED_EXTENSIONS),
     )
 
-    screenshot_interval = 10
-    if uploaded_file is not None and Path(uploaded_file.name).suffix.lower() in VIDEO_EXTENSIONS:
-        screenshot_interval = st.number_input(
-            "Screenshot interval in seconds",
-            min_value=1,
-            max_value=3600,
-            value=10,
-            step=1,
-        )
-
     process_clicked = st.button(
         "Generate transcript",
         type="primary",
@@ -313,7 +399,6 @@ def main() -> None:
     if process_clicked and uploaded_file is not None:
         process_upload(
             uploaded_file=uploaded_file,
-            screenshot_interval=int(screenshot_interval),
             model_name=model_name,
             compute_type=compute_type,
             local_files_only=local_files_only,
