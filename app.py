@@ -21,6 +21,7 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 APP_TITLE = "Local Transcript Tool"
 OUTPUT_DIR = Path("outputs")
+MODEL_DIR = Path("models")
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".wma"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 SUPPORTED_EXTENSIONS = AUDIO_EXTENSIONS | VIDEO_EXTENSIONS
@@ -131,12 +132,29 @@ def capture_screenshots_at_timestamps(
 
 
 @st.cache_resource(show_spinner=False)
-def load_model(model_name: str, compute_type: str, local_files_only: bool) -> WhisperModel:
+def load_model(model_name: str, compute_type: str) -> WhisperModel:
+    model_path = resolve_local_model_path(model_name)
     return WhisperModel(
-        model_name,
+        str(model_path),
         device="cpu",
         compute_type=compute_type,
-        local_files_only=local_files_only,
+        local_files_only=True,
+    )
+
+
+def resolve_local_model_path(model_name: str) -> Path:
+    candidates = [
+        MODEL_DIR / f"faster-whisper-{model_name}",
+        MODEL_DIR / model_name,
+        MODEL_DIR / "Systran" / f"faster-whisper-{model_name}",
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    searched = "\n".join(str(path) for path in candidates)
+    raise RuntimeError(
+        "Local model folder not found for "
+        f"'{model_name}'. Expected one of:\n{searched}"
     )
 
 
@@ -162,10 +180,9 @@ def transcribe_audio(
     audio_path: Path,
     model_name: str,
     compute_type: str,
-    local_files_only: bool,
     language: str | None,
 ) -> tuple[str, list[TranscriptSegment]]:
-    model = load_model(model_name, compute_type, local_files_only)
+    model = load_model(model_name, compute_type)
     segments_iter, _info = model.transcribe(
         str(audio_path),
         language=language or None,
@@ -265,16 +282,15 @@ def write_pdf_report(
     return pdf_path
 
 
-def render_settings() -> tuple[str, str, bool, str | None]:
+def render_settings() -> tuple[str, str, str | None]:
     with st.sidebar:
         st.header("Transcription")
         model_name = st.selectbox("Model", MODEL_OPTIONS, index=MODEL_OPTIONS.index("small"))
         compute_type = st.selectbox("Compute type", COMPUTE_OPTIONS, index=COMPUTE_OPTIONS.index("int8"))
-        local_files_only = st.checkbox("Use local model files only", value=True)
         language_input = st.text_input("Language code", value="", placeholder="Optional, e.g. en or hi")
         st.divider()
-        st.caption("Install ffmpeg and pre-download models for fully offline use.")
-    return model_name, compute_type, local_files_only, language_input.strip() or None
+        st.caption("Install ffmpeg and place model folders under `models/` for offline use.")
+    return model_name, compute_type, language_input.strip() or None
 
 
 def render_download(label: str, path: Path, mime: str) -> None:
@@ -291,7 +307,6 @@ def process_upload(
     uploaded_file,
     model_name: str,
     compute_type: str,
-    local_files_only: bool,
     language: str | None,
 ) -> None:
     ensure_output_dir()
@@ -322,7 +337,6 @@ def process_upload(
             audio_path=audio_path,
             model_name=model_name,
             compute_type=compute_type,
-            local_files_only=local_files_only,
             language=language,
         )
 
@@ -351,10 +365,10 @@ def process_upload(
     except Exception as exc:
         progress.empty()
         st.error(str(exc))
-        if "model" in str(exc).lower() or "huggingface" in str(exc).lower():
+        if "model" in str(exc).lower() or "local model folder" in str(exc).lower():
             st.info(
-                "The selected model was not found locally. Uncheck 'Use local model files only' "
-                "once while online, or pre-download the model into the faster-whisper cache."
+                "Place the downloaded model under `models/`, for example "
+                "`models/faster-whisper-small`, and try again."
             )
         return
 
@@ -373,7 +387,7 @@ def process_upload(
 
 def main() -> None:
     page_setup()
-    model_name, compute_type, local_files_only, language = render_settings()
+    model_name, compute_type, language = render_settings()
 
     if not ffmpeg_available():
         st.warning(
@@ -401,7 +415,6 @@ def main() -> None:
             uploaded_file=uploaded_file,
             model_name=model_name,
             compute_type=compute_type,
-            local_files_only=local_files_only,
             language=language,
         )
 

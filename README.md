@@ -49,9 +49,23 @@ http://localhost:8501
 
 ## Offline Model Use
 
-The sidebar option **Use local model files only** is enabled by default. With that enabled, transcription works only if the selected model already exists in the local model cache.
+The app loads Whisper models directly from the local `models/` folder.
 
-To cache a model once while online, run the app, uncheck **Use local model files only**, select the model, and process a small file. After the model is downloaded, turn the checkbox back on for offline use.
+Expected folder layout examples:
+
+```text
+models/faster-whisper-small
+models/faster-whisper-medium
+models/faster-whisper-large-v3
+```
+
+For the `small` model, download the files from:
+
+```text
+https://huggingface.co/Systran/faster-whisper-small/tree/main
+```
+
+Then place that downloaded model folder under `models/`.
 
 Default settings:
 
@@ -87,5 +101,5 @@ The uploader accepts common formats handled by ffmpeg, including:
 ## Notes
 
 - If ffmpeg is missing, the app disables processing and shows setup guidance.
-- If the selected model is missing while local-only mode is enabled, the app shows a clear error and keeps all processing local.
+- If the selected model folder is missing under `models/`, the app shows a clear error.
 - If a binary dependency fails to install for your Python version, retry with Python 3.10-3.12.
